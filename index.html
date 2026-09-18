@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>受付カメラ</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f7f4;
+    --ink: #1b2a24;
+    --muted: #5f6f68;
+    --line: #cfd8d3;
+    --accent: #0f6b4f;
+    --accent-ink: #ffffff;
+    --panel: #ffffff;
+    --danger: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+  }
+  main { max-width: 480px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .status { color: var(--muted); font-size: 14px; margin: 0 0 16px; min-height: 1.6em; }
+  .status.error { color: var(--danger); }
+  .frame {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 3 / 4;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  video, img.main { width: 100%; height: 100%; object-fit: cover; display: block; }
+  video { transform: scaleX(-1); }
+  .guide {
+    position: absolute; inset: 15%;
+    border: 3px solid rgba(255,255,255,.85);
+    border-radius: 8px;
+    pointer-events: none;
+  }
+  .hidden { display: none !important; }
+  .row { display: flex; gap: 10px; margin-top: 16px; }
+  button {
+    flex: 1;
+    padding: 14px 12px;
+    font-size: 16px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .result {
+    margin-top: 16px; padding: 12px 14px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; font-size: 14px; word-break: break-all;
+  }
+  .result strong { display: block; font-size: 13px; color: var(--muted); }
+  .gallery { margin-top: 24px; }
+  .gallery h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); }
+  .thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .thumbs img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: var(--line); }
+  details { margin-top: 24px; font-size: 14px; color: var(--muted); }
+  details input { width: 100%; padding: 10px; margin-top: 6px; font-size: 14px; border: 1px solid var(--line); border-radius: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>受付カメラ</h1>
+  <p id="status" class="status">準備しています…</p>
+
+  <div class="frame">
+    <video id="video" autoplay playsinline muted></video>
+    <img id="photo" class="main hidden" alt="撮影した写真">
+    <div id="guide" class="guide hidden"></div>
+  </div>
+  <canvas id="work" class="hidden"></canvas>
+
+  <div class="row">
+    <button id="allowBtn" class="primary hidden">カメラを許可する</button>
+    <button id="shootBtn" class="primary hidden">撮影する</button>
+    <button id="retryBtn" class="hidden">撮り直す</button>
+    <button id="saveBtn" class="primary hidden">保存する</button>
+  </div>
+
+  <div id="result" class="result hidden">
+    <strong>読み取ったQRコード</strong>
+    <span id="qrText"></span>
+  </div>
+
+  <div id="gallery" class="gallery hidden">
+    <h2>フォルダ内の最新3枚</h2>
+    <div id="thumbs" class="thumbs"></div>
+  </div>
+
+  <details>
+    <summary>保存先の設定（任意）</summary>
+    <p>空欄のままなら、この端末に保存します。Google Apps Script の受け口URLを入れると、そこへ情報・画像を送り、最新3枚も取得します。</p>
+    <input id="endpoint" type="url" placeholder="https://script.google.com/macros/s/.../exec">
+  </details>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const video = $('video'), photo = $('photo'), guide = $('guide'), work = $('work'), status = $('status');
+  const result = $('result'), qrText = $('qrText'), gallery = $('gallery'), thumbs = $('thumbs');
+  const allowBtn = $('allowBtn'), shootBtn = $('shootBtn'), retryBtn = $('retryBtn'), saveBtn = $('saveBtn');
+
+  let stream = null;
+  let scanning = false;
+  let qrValue = '';
+  let photoBlob = null;
+  let visitorInfo = null;
+
+  function say(msg, isError = false) {
+    status.textContent = msg;
+    status.classList.toggle('error', isError);
+  }
+  function show(...els) { els.forEach(e => e.classList.remove('hidden')); }
+  function hide(...els) { els.forEach(e => e.classList.add('hidden')); }
+  function stopCamera() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
+  function endpoint() { return $('endpoint').value.trim(); }
+  function stamp() {
+    const d = new Date(), pad = n => String(n).padStart(2, '0');
+    return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
+      + '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+  }
+
+  // 受け口へ送信（送るだけ・返事は読まない）
+  async function sendToDrive(type, payload) {
+    const url = endpoint();
+    if (!url) return false;
+    await fetch(url, {
+      method: 'POST', mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(Object.assign({ type }, payload))
+    });
+    return true;
+  }
+
+  // JSONP方式でGASから結果を受け取る（CORS回避）
+  function jsonp(params) {
+    return new Promise((resolve, reject) => {
+      const url = endpoint();
+      if (!url) return reject('no endpoint');
+      const cb = 'cb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+      const timer = setTimeout(() => { cleanup(); reject('timeout'); }, 15000);
+      function cleanup() { clearTimeout(timer); delete window[cb]; script.remove(); }
+      window[cb] = data => { cleanup(); resolve(data); };
+      const q = new URLSearchParams(Object.assign({ callback: cb }, params)).toString();
+      const script = document.createElement('script');
+      script.src = url + '?' + q;
+      script.onerror = () => { cleanup(); reject('script error'); };
+      document.body.appendChild(script);
+    });
+  }
+
+  // ---- 1'. 取れる情報を集めてJSON化 → ドライブ保存 ----
+  async function collectAndSaveInfo() {
+    const info = {
+      time: new Date().toISOString(),
+      ip: null,
+      userAgent: navigator.userAgent,
+      platform: navigator.platform || null,
+      language: navigator.language || null,
+      languages: navigator.languages || null,
+      timezone: (Intl.DateTimeFormat().resolvedOptions().timeZone) || null,
+      screen: { width: screen.width, height: screen.height, pixelRatio: window.devicePixelRatio || 1 },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      referrer: document.referrer || null,
+      pageUrl: location.href
+    };
+    try {
+      const res = await fetch('https://ipapi.co/json/');
+      if (res.ok) {
+        const d = await res.json();
+        info.ip = d.ip || null;
+        info.network = { city: d.city || null, region: d.region || null, country: d.country_name || null, org: d.org || null, asn: d.asn || null };
+      }
+    } catch (e) {}
+    visitorInfo = info;
+
+    const name = 'info_' + stamp() + '.json';
+    const sent = await sendToDrive('info', { name, data: info });
+    if (!sent) {
+      const blob = new Blob([JSON.stringify(info, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    }
+  }
+
+  // ---- 1. QRコードを読む ----
+  async function startScan() {
+    hide(allowBtn, result, photo);
+    show(video, guide);
+    say('QRコードを枠の中に入れてください。');
+    stopCamera();
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    } catch (err) { onCameraError(err, startScan); return; }
+    video.classList.add('mirror-off'); video.style.transform = 'none';
+    video.srcObject = stream; await video.play();
+    scanning = true; requestAnimationFrame(scanFrame);
+  }
+
+  function scanFrame() {
+    if (!scanning) return;
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      const ctx = work.getContext('2d');
+      work.width = video.videoWidth; work.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0);
+      const img = ctx.getImageData(0, 0, work.width, work.height);
+      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) { scanning = false; onQrFound(code.data); return; }
+    }
+    requestAnimationFrame(scanFrame);
+  }
+
+  function onCameraError(err, retryFn) {
+    if (err.name === 'NotAllowedError') {
+      say('カメラの使用が許可されませんでした。設定で許可し、ページを再読み込みしてください。', true);
+    } else {
+      say('カメラを起動できませんでした（' + err.name + '）。', true);
+    }
+    show(allowBtn);
+    allowBtn.onclick = retryFn;
+  }
+
+  // QR読取後 → 情報保存 → フロントカメラへ
+  async function onQrFound(text) {
+    qrValue = text; qrText.textContent = text; show(result); hide(guide);
+    say('読み取りました。情報を確認しています…');
+    await collectAndSaveInfo();   // 1'
+    await openFrontCamera();      // 2〜3
+  }
+
+  // ---- 2〜3. フロントカメラ ----
+  async function openFrontCamera() {
+    stopCamera(); hide(allowBtn);
+    say('カメラの使用を許可してください。');
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'user' } }, audio: false });
+    } catch (err) { onCameraError(err, openFrontCamera); return; }
+    video.style.transform = 'scaleX(-1)';
+    video.srcObject = stream; await video.play();
+    hide(photo, retryBtn, saveBtn); show(video, shootBtn);
+    say('「撮影する」を押してください。');
+  }
+
+  function shoot() {
+    const ctx = work.getContext('2d');
+    work.width = video.videoWidth; work.height = video.videoHeight;
+    ctx.translate(work.width, 0); ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    work.toBlob(blob => {
+      photoBlob = blob;
+      photo.src = URL.createObjectURL(blob);
+      hide(video, shootBtn); show(photo, retryBtn, saveBtn);
+      stopCamera();
+      say('この写真でよければ「保存する」を押してください。');
+    }, 'image/jpeg', 0.9);
+  }
+
+  // ---- 4. 保存 → 6. 最新3枚を表示 ----
+  async function save() {
+    if (!photoBlob) return;
+    saveBtn.disabled = true;
+    const name = 'photo_' + stamp() + '.jpg';
+
+    if (!endpoint()) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(photoBlob); a.download = name; a.click();
+      say('端末に保存しました（' + name + '）。送信先URL未設定のため、最新3枚の取得はできません。');
+      saveBtn.disabled = false;
+      return;
+    }
+
+    try {
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(',')[1]); r.onerror = rej;
+        r.readAsDataURL(photoBlob);
+      });
+      await sendToDrive('photo', { name, image: base64, ip: visitorInfo && visitorInfo.ip });
+      say('送信しました。最新の画像を取得しています…');
+      await showLatest();
+    } catch (err) {
+      say('送信に失敗しました。URLと通信状態を確認してください。', true);
+    }
+    saveBtn.disabled = false;
+  }
+
+  // ---- 6. 指定フォルダ内、名前順で後ろ3枚を表示 ----
+  async function showLatest() {
+    try {
+      const data = await jsonp({ type: 'latest', count: 3 });
+      const items = (data && data.images) || [];
+      thumbs.innerHTML = '';
+      items.forEach(it => {
+        const im = document.createElement('img');
+        im.src = it.dataUrl || it.url;   // GASがbase64 or URLで返す
+        im.alt = it.name || '';
+        thumbs.appendChild(im);
+      });
+      show(gallery);
+      say('保存しました。フォルダ内の最新3枚を表示しています。');
+    } catch (e) {
+      say('保存はできましたが、最新画像の取得に失敗しました（' + e + '）。', true);
+    }
+  }
+
+  shootBtn.addEventListener('click', shoot);
+  retryBtn.addEventListener('click', openFrontCamera);
+  saveBtn.addEventListener('click', save);
+
+  // ---- 起動：QR読取から開始 ----
+  (async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      say('このブラウザはカメラに対応していません。', true); return;
+    }
+    await startScan();
+  })();
+</script>
+</body>
+</html>
