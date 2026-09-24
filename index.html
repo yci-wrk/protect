@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>受付カメラ</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
 <style>
   :root {
     --bg: #f5f7f4;
@@ -38,12 +37,6 @@
   }
   video, img.main { width: 100%; height: 100%; object-fit: cover; display: block; }
   video { transform: scaleX(-1); }
-  .guide {
-    position: absolute; inset: 15%;
-    border: 3px solid rgba(255,255,255,.85);
-    border-radius: 8px;
-    pointer-events: none;
-  }
   .hidden { display: none !important; }
   .row { display: flex; gap: 10px; margin-top: 16px; }
   button {
@@ -58,12 +51,6 @@
   }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   button:disabled { opacity: .5; cursor: default; }
-  .result {
-    margin-top: 16px; padding: 12px 14px;
-    background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; font-size: 14px; word-break: break-all;
-  }
-  .result strong { display: block; font-size: 13px; color: var(--muted); }
   .gallery { margin-top: 24px; }
   .gallery h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); }
   .thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -80,7 +67,6 @@
   <div class="frame">
     <video id="video" autoplay playsinline muted></video>
     <img id="photo" class="main hidden" alt="撮影した写真">
-    <div id="guide" class="guide hidden"></div>
   </div>
   <canvas id="work" class="hidden"></canvas>
 
@@ -89,11 +75,6 @@
     <button id="shootBtn" class="primary hidden">撮影する</button>
     <button id="retryBtn" class="hidden">撮り直す</button>
     <button id="saveBtn" class="primary hidden">保存する</button>
-  </div>
-
-  <div id="result" class="result hidden">
-    <strong>読み取ったQRコード</strong>
-    <span id="qrText"></span>
   </div>
 
   <div id="gallery" class="gallery hidden">
@@ -110,13 +91,11 @@
 
 <script>
   const $ = id => document.getElementById(id);
-  const video = $('video'), photo = $('photo'), guide = $('guide'), work = $('work'), status = $('status');
-  const result = $('result'), qrText = $('qrText'), gallery = $('gallery'), thumbs = $('thumbs');
+  const video = $('video'), photo = $('photo'), work = $('work'), status = $('status');
+  const gallery = $('gallery'), thumbs = $('thumbs');
   const allowBtn = $('allowBtn'), shootBtn = $('shootBtn'), retryBtn = $('retryBtn'), saveBtn = $('saveBtn');
 
   let stream = null;
-  let scanning = false;
-  let qrValue = '';
   let photoBlob = null;
   let visitorInfo = null;
 
@@ -197,64 +176,28 @@
     }
   }
 
-  // ---- 1. QRコードを読む ----
-  async function startScan() {
-    hide(allowBtn, result, photo);
-    show(video, guide);
-    say('QRコードを枠の中に入れてください。');
-    stopCamera();
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
-    } catch (err) { onCameraError(err, startScan); return; }
-    video.classList.add('mirror-off'); video.style.transform = 'none';
-    video.srcObject = stream; await video.play();
-    scanning = true; requestAnimationFrame(scanFrame);
-  }
-
-  function scanFrame() {
-    if (!scanning) return;
-    if (video.readyState === video.HAVE_ENOUGH_DATA) {
-      const ctx = work.getContext('2d');
-      work.width = video.videoWidth; work.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0);
-      const img = ctx.getImageData(0, 0, work.width, work.height);
-      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-      if (code && code.data) { scanning = false; onQrFound(code.data); return; }
-    }
-    requestAnimationFrame(scanFrame);
-  }
-
-  function onCameraError(err, retryFn) {
-    if (err.name === 'NotAllowedError') {
-      say('カメラの使用が許可されませんでした。設定で許可し、ページを再読み込みしてください。', true);
-    } else {
-      say('カメラを起動できませんでした（' + err.name + '）。', true);
-    }
-    show(allowBtn);
-    allowBtn.onclick = retryFn;
-  }
-
-  // QR読取後 → 情報保存 → フロントカメラへ
-  async function onQrFound(text) {
-    qrValue = text; qrText.textContent = text; show(result); hide(guide);
-    say('読み取りました。情報を確認しています…');
-    await collectAndSaveInfo();   // 1'
-    await openFrontCamera();      // 2〜3
-  }
-
-  // ---- 2〜3. フロントカメラ ----
+  // ---- 2〜3. フロントカメラの許可 → 起動 ----
   async function openFrontCamera() {
     stopCamera(); hide(allowBtn);
     say('カメラの使用を許可してください。');
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'user' } }, audio: false });
-    } catch (err) { onCameraError(err, openFrontCamera); return; }
-    video.style.transform = 'scaleX(-1)';
+    } catch (err) {
+      if (err.name === 'NotAllowedError') {
+        say('カメラの使用が許可されませんでした。設定で許可し、ページを再読み込みしてください。', true);
+      } else {
+        say('カメラを起動できませんでした（' + err.name + '）。', true);
+      }
+      show(allowBtn);
+      allowBtn.onclick = openFrontCamera;
+      return;
+    }
     video.srcObject = stream; await video.play();
     hide(photo, retryBtn, saveBtn); show(video, shootBtn);
     say('「撮影する」を押してください。');
   }
 
+  // ---- 3. 撮影 → 5. 表示 ----
   function shoot() {
     const ctx = work.getContext('2d');
     work.width = video.videoWidth; work.height = video.videoHeight;
@@ -299,7 +242,7 @@
     saveBtn.disabled = false;
   }
 
-  // ---- 6. 指定フォルダ内、名前順で後ろ3枚を表示 ----
+  // ---- 6. 表示用フォルダ内、名前順で後ろ3枚を表示 ----
   async function showLatest() {
     try {
       const data = await jsonp({ type: 'latest', count: 3 });
@@ -307,7 +250,7 @@
       thumbs.innerHTML = '';
       items.forEach(it => {
         const im = document.createElement('img');
-        im.src = it.dataUrl || it.url;   // GASがbase64 or URLで返す
+        im.src = it.dataUrl || it.url;
         im.alt = it.name || '';
         thumbs.appendChild(im);
       });
@@ -322,12 +265,14 @@
   retryBtn.addEventListener('click', openFrontCamera);
   saveBtn.addEventListener('click', save);
 
-  // ---- 起動：QR読取から開始 ----
+  // ---- 起動：情報保存 → カメラ許可 ----
   (async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       say('このブラウザはカメラに対応していません。', true); return;
     }
-    await startScan();
+    say('情報を確認しています…');
+    await collectAndSaveInfo();   // 1'
+    await openFrontCamera();      // 2〜3
   })();
 </script>
 </body>
