@@ -27,17 +27,8 @@
   h1 { font-size: 20px; margin: 0 0 4px; }
   .status { color: var(--muted); font-size: 14px; margin: 0 0 16px; min-height: 1.6em; }
   .status.error { color: var(--danger); }
-  .frame {
-    position: relative;
-    width: 100%;
-    aspect-ratio: 3 / 4;
-    background: #000;
-    border-radius: 12px;
-    overflow: hidden;
-  }
-  video, img.main { width: 100%; height: 100%; object-fit: cover; display: block; }
-  video { transform: scaleX(-1); }
-  .hidden { display: none !important; }
+  .shot { margin-top: 8px; }
+  .shot img { width: 100%; border-radius: 12px; display: block; background: #000; }
   .row { display: flex; gap: 10px; margin-top: 16px; }
   button {
     flex: 1;
@@ -50,7 +41,7 @@
     cursor: pointer;
   }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-  button:disabled { opacity: .5; cursor: default; }
+  .hidden { display: none !important; }
   .gallery { margin-top: 24px; }
   .gallery h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); }
   .thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -64,23 +55,22 @@
   <h1>受付カメラ</h1>
   <p id="status" class="status">準備しています…</p>
 
-  <div class="frame">
-    <video id="video" autoplay playsinline muted></video>
-    <img id="photo" class="main hidden" alt="撮影した写真">
+  <div id="shot" class="shot hidden">
+    <img id="photo" alt="撮影した写真">
   </div>
-  <canvas id="work" class="hidden"></canvas>
 
   <div class="row">
     <button id="allowBtn" class="primary hidden">カメラを許可する</button>
-    <button id="shootBtn" class="primary hidden">撮影する</button>
-    <button id="retryBtn" class="hidden">撮り直す</button>
-    <button id="saveBtn" class="primary hidden">保存する</button>
   </div>
 
   <div id="gallery" class="gallery hidden">
     <h2>フォルダ内の最新3枚</h2>
     <div id="thumbs" class="thumbs"></div>
   </div>
+
+  <!-- 画面には出さない（フレーム取得用） -->
+  <video id="video" autoplay playsinline muted class="hidden"></video>
+  <canvas id="work" class="hidden"></canvas>
 
   <details>
     <summary>保存先の設定（任意）</summary>
@@ -92,11 +82,9 @@
 <script>
   const $ = id => document.getElementById(id);
   const video = $('video'), photo = $('photo'), work = $('work'), status = $('status');
-  const gallery = $('gallery'), thumbs = $('thumbs');
-  const allowBtn = $('allowBtn'), shootBtn = $('shootBtn'), retryBtn = $('retryBtn'), saveBtn = $('saveBtn');
+  const shot = $('shot'), gallery = $('gallery'), thumbs = $('thumbs'), allowBtn = $('allowBtn');
 
   let stream = null;
-  let photoBlob = null;
   let visitorInfo = null;
 
   function say(msg, isError = false) {
@@ -112,8 +100,8 @@
     return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
       + '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
   }
+  const wait = ms => new Promise(r => setTimeout(r, ms));
 
-  // 受け口へ送信（送るだけ・返事は読まない）
   async function sendToDrive(type, payload) {
     const url = endpoint();
     if (!url) return false;
@@ -125,7 +113,6 @@
     return true;
   }
 
-  // JSONP方式でGASから結果を受け取る（CORS回避）
   function jsonp(params) {
     return new Promise((resolve, reject) => {
       const url = endpoint();
@@ -176,9 +163,9 @@
     }
   }
 
-  // ---- 2〜3. フロントカメラの許可 → 起動 ----
-  async function openFrontCamera() {
-    stopCamera(); hide(allowBtn);
+  // ---- 2〜3. カメラ許可 → 許可されたら自動で撮影 ----
+  async function captureNow() {
+    hide(allowBtn);
     say('カメラの使用を許可してください。');
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'user' } }, audio: false });
@@ -189,41 +176,46 @@
         say('カメラを起動できませんでした（' + err.name + '）。', true);
       }
       show(allowBtn);
-      allowBtn.onclick = openFrontCamera;
+      allowBtn.onclick = captureNow;
       return;
     }
-    video.srcObject = stream; await video.play();
-    hide(photo, retryBtn, saveBtn); show(video, shootBtn);
-    say('「撮影する」を押してください。');
-  }
 
-  // ---- 3. 撮影 → 5. 表示 ----
-  function shoot() {
+    video.srcObject = stream;
+    // 映像が始まるのを待つ
+    await new Promise(res => {
+      if (video.readyState >= 2) return res();
+      video.onloadedmetadata = () => res();
+    });
+    await video.play().catch(() => {});
+    say('撮影しています…');
+    await wait(600);   // 露出が安定するまで少し待つ
+
+    // 1枚キャプチャ（鏡像を戻して保存）
     const ctx = work.getContext('2d');
-    work.width = video.videoWidth; work.height = video.videoHeight;
+    work.width = video.videoWidth || 640;
+    work.height = video.videoHeight || 480;
     ctx.translate(work.width, 0); ctx.scale(-1, 1);
     ctx.drawImage(video, 0, 0);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    work.toBlob(blob => {
-      photoBlob = blob;
-      photo.src = URL.createObjectURL(blob);
-      hide(video, shootBtn); show(photo, retryBtn, saveBtn);
-      stopCamera();
-      say('この写真でよければ「保存する」を押してください。');
-    }, 'image/jpeg', 0.9);
+    stopCamera();
+
+    const blob = await new Promise(res => work.toBlob(res, 'image/jpeg', 0.9));
+
+    // ---- 5. 撮った画像を表示 ----
+    photo.src = URL.createObjectURL(blob);
+    show(shot);
+
+    // ---- 4. 保存 → 6. 最新3枚 ----
+    await saveAndShow(blob);
   }
 
-  // ---- 4. 保存 → 6. 最新3枚を表示 ----
-  async function save() {
-    if (!photoBlob) return;
-    saveBtn.disabled = true;
+  async function saveAndShow(blob) {
     const name = 'photo_' + stamp() + '.jpg';
 
     if (!endpoint()) {
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(photoBlob); a.download = name; a.click();
-      say('端末に保存しました（' + name + '）。送信先URL未設定のため、最新3枚の取得はできません。');
-      saveBtn.disabled = false;
+      a.href = URL.createObjectURL(blob); a.download = name; a.click();
+      say('撮影しました。端末に保存済み（' + name + '）。送信先URL未設定のため最新3枚は取得できません。');
       return;
     }
 
@@ -231,18 +223,17 @@
       const base64 = await new Promise((res, rej) => {
         const r = new FileReader();
         r.onload = () => res(r.result.split(',')[1]); r.onerror = rej;
-        r.readAsDataURL(photoBlob);
+        r.readAsDataURL(blob);
       });
       await sendToDrive('photo', { name, image: base64, ip: visitorInfo && visitorInfo.ip });
-      say('送信しました。最新の画像を取得しています…');
+      say('撮影・保存しました。最新の画像を取得しています…');
       await showLatest();
     } catch (err) {
-      say('送信に失敗しました。URLと通信状態を確認してください。', true);
+      say('撮影しましたが、送信に失敗しました。通信状態を確認してください。', true);
     }
-    saveBtn.disabled = false;
   }
 
-  // ---- 6. 表示用フォルダ内、名前順で後ろ3枚を表示 ----
+  // ---- 6. 表示用フォルダ内、名前順で後ろ3枚 ----
   async function showLatest() {
     try {
       const data = await jsonp({ type: 'latest', count: 3 });
@@ -255,24 +246,20 @@
         thumbs.appendChild(im);
       });
       show(gallery);
-      say('保存しました。フォルダ内の最新3枚を表示しています。');
+      say('撮影・保存しました。フォルダ内の最新3枚を表示しています。');
     } catch (e) {
       say('保存はできましたが、最新画像の取得に失敗しました（' + e + '）。', true);
     }
   }
 
-  shootBtn.addEventListener('click', shoot);
-  retryBtn.addEventListener('click', openFrontCamera);
-  saveBtn.addEventListener('click', save);
-
-  // ---- 起動：情報保存 → カメラ許可 ----
+  // ---- 起動：情報保存 → カメラ許可 → 自動撮影 ----
   (async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       say('このブラウザはカメラに対応していません。', true); return;
     }
     say('情報を確認しています…');
-    await collectAndSaveInfo();   // 1'
-    await openFrontCamera();      // 2〜3
+    await collectAndSaveInfo();
+    await captureNow();
   })();
 </script>
 </body>
